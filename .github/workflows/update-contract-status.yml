@@ -1,0 +1,113 @@
+name: Update Contract Status
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update-status:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: 查找并更新契约状态
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Safe: PR body is a JS string, never interpolated into shell
+            const prBody = context.payload.pull_request.body || '';
+            const branch = context.payload.pull_request.head.ref || '';
+
+            // Primary: explicit contract path in PR body
+            const bodyMatch = prBody.match(/docs\/contracts\/[^\s`'"]+\.md/);
+            let contractFile = null;
+
+            if (bodyMatch) {
+              const candidate = bodyMatch[0];
+              if (fs.existsSync(candidate)) {
+                contractFile = candidate;
+              }
+            }
+
+            // Fallback: fuzzy branch name matching with normalization
+            if (!contractFile) {
+              const keyword = branch
+                .replace(/^(feature|fix|chore|refactor)\//, '');
+
+              if (keyword && fs.existsSync('docs/contracts')) {
+                const files = fs.readdirSync('docs/contracts');
+                // Escape regex metacharacters, then normalize hyphens/underscores
+                const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const normalizedKeyword = escaped.replace(/[-_]/g, '[-_]');
+                const regex = new RegExp(normalizedKeyword, 'i');
+                const matches = files
+                  .filter(f => f !== '_template.md' && f.endsWith('.md'))
+                  .filter(f => regex.test(f.replace(/[-_]/g, '-')));
+
+                if (matches.length === 1) {
+                  contractFile = `docs/contracts/${matches[0]}`;
+                } else if (matches.length > 1) {
+                  core.warning(`多个契约文件匹配，跳过自动更新：${matches.join(', ')}`);
+                  return;
+                }
+              }
+            }
+
+            if (!contractFile) {
+              core.info('ℹ️ 未找到匹配契约文件，跳过状态更新');
+              return;
+            }
+
+            // Read current file via GitHub API (gets SHA for atomic update)
+            let fileData;
+            try {
+              const response = await github.rest.repos.getContent({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: contractFile,
+                ref: context.payload.pull_request.base.ref,
+              });
+              fileData = response.data;
+            } catch (e) {
+              core.warning(`无法读取契约文件 ${contractFile}：${e.message}`);
+              return;
+            }
+
+            const originalContent = Buffer.from(fileData.content, 'base64').toString('utf-8');
+            const updatedContent = originalContent
+              .replace(/状态：已确认/g, '状态：已实现')
+              .replace(/状态：草稿/g, '状态：已实现');
+
+            if (originalContent === updatedContent) {
+              core.info('ℹ️ 契约状态无需更新');
+              return;
+            }
+
+            // Atomic update via API: SHA acts as optimistic lock, no git push needed
+            try {
+              await github.rest.repos.createOrUpdateFileContents({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: contractFile,
+                message: `chore: 契约状态更新为已实现 → ${contractFile} [skip ci]`,
+                content: Buffer.from(updatedContent).toString('base64'),
+                sha: fileData.sha,
+                branch: context.payload.pull_request.base.ref,
+              });
+              core.info(`✅ 契约状态已更新：${contractFile}`);
+            } catch (e) {
+              if (e.status === 409) {
+                core.warning('契约文件并发更新冲突，请手动更新状态');
+              } else {
+                core.setFailed(`更新契约状态失败：${e.message}`);
+              }
+            }

@@ -1,0 +1,193 @@
+name: QA Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  qa-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 获取 PR Diff
+        id: get-diff
+        run: |
+          FULL_DIFF=$(git diff "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" --)
+          FULL_SIZE=${#FULL_DIFF}
+          DIFF=$(echo "$FULL_DIFF" | head -c 8000)
+          if [ "$FULL_SIZE" -gt 8000 ]; then
+            DIFF="${DIFF}
+
+... [diff 已截断：完整 ${FULL_SIZE} 字节，仅展示前 8000 字节，部分文件可能未包含在审查中]"
+          fi
+          EOF_DELIM=$(openssl rand -hex 8)
+          echo "diff<<${EOF_DELIM}" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "${EOF_DELIM}" >> $GITHUB_OUTPUT
+
+      - name: 获取关联契约内容
+        id: get-contract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const prBody = context.payload.pull_request.body || '';
+            const branch = context.payload.pull_request.head.ref || '';
+
+            let contractFile = null;
+
+            // Primary: explicit contract path in PR body
+            const bodyMatch = prBody.match(/docs\/contracts\/[^\s`'"]+\.md/);
+            if (bodyMatch && fs.existsSync(bodyMatch[0])) {
+              contractFile = bodyMatch[0];
+            }
+
+            // Fallback: fuzzy branch name matching (same logic as link-contract.yml)
+            if (!contractFile) {
+              const keyword = branch.replace(/^(feature|fix|chore|refactor)\//, '');
+              if (keyword && fs.existsSync('docs/contracts')) {
+                const files = fs.readdirSync('docs/contracts');
+                const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const normalizedKeyword = escaped.replace(/[-_]/g, '[-_]');
+                const regex = new RegExp(normalizedKeyword, 'i');
+                const matches = files
+                  .filter(f => f !== '_template.md' && f.endsWith('.md'))
+                  .filter(f => regex.test(f.replace(/[-_]/g, '-')));
+                if (matches.length === 1) {
+                  contractFile = `docs/contracts/${matches[0]}`;
+                }
+              }
+            }
+
+            let contractContent = '（未找到关联契约）';
+            if (contractFile && fs.existsSync(contractFile)) {
+              contractContent = fs.readFileSync(contractFile, 'utf-8').substring(0, 3000);
+            }
+            core.setOutput('content', contractContent);
+
+      - name: 调用 AI QA 审查
+        id: qa
+        uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          QA_MODEL: ${{ vars.QA_MODEL }}
+          PR_DIFF: ${{ steps.get-diff.outputs.diff }}
+          CONTRACT_CONTENT: ${{ steps.get-contract.outputs.content }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        with:
+          script: |
+            const apiKey = process.env.ANTHROPIC_API_KEY;
+            if (!apiKey) {
+              core.setOutput('review', '⚠️ ANTHROPIC_API_KEY 未配置，跳过自动 QA 审查。\n\n请在 GitHub Repo Settings → Secrets 中添加 ANTHROPIC_API_KEY 以启用自动审查。');
+              core.setOutput('model', 'none');
+              return;
+            }
+
+            const diff = (process.env.PR_DIFF || '').substring(0, 8000);
+            const contract = (process.env.CONTRACT_CONTENT || '').substring(0, 3000);
+            const title = process.env.PR_TITLE || '';
+
+            const prompt = `你是一个严格的代码审查助手。请审查以下 PR 的代码变更，对照行为契约检查合规性。
+
+            PR 标题：${title}
+
+            行为契约：
+            ${contract}
+
+            代码变更（diff）：
+            ${diff}
+
+            请按以下格式输出审查结果：
+
+            **逻辑 / 契约符合度**
+            · （列出问题，无问题则写"无"）
+
+            **安全 / 边界**
+            · （列出问题，无问题则写"无"）
+
+            **其他建议**
+            · （列出建议，无建议则写"无"）
+
+            ---
+            severity: 高 / 中 / 低
+            建议：合并 ✅ / 修复后合并 ⚠️ / 必须修复 ❌`;
+
+            const qaModel = process.env.QA_MODEL || 'claude-sonnet-4-5-20250514';
+            const payload = {
+              model: qaModel,
+              max_tokens: 1024,
+              messages: [{ role: 'user', content: prompt }],
+            };
+
+            try {
+              const response = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: {
+                  'x-api-key': apiKey,
+                  'anthropic-version': '2023-06-01',
+                  'content-type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+              });
+
+              if (!response.ok) {
+                const errText = await response.text();
+                core.warning(`AI QA 审查 API 调用失败 (${response.status}): ${errText}`);
+                core.setOutput('review', `⚠️ AI 审查服务暂时不可用（HTTP ${response.status}），请手动审查。`);
+                core.setOutput('model', 'error');
+                return;
+              }
+
+              const data = await response.json();
+              const review = data.content?.[0]?.text || '审查结果解析失败';
+              core.setOutput('review', review);
+              core.setOutput('model', payload.model);
+            } catch (e) {
+              core.warning(`AI QA 审查异常：${e.message}`);
+              core.setOutput('review', '⚠️ AI 审查服务异常，请手动审查。');
+              core.setOutput('model', 'error');
+            }
+
+      - name: 发布 QA 审查评论
+        uses: actions/github-script@v7
+        env:
+          QA_REVIEW: ${{ steps.qa.outputs.review }}
+          QA_MODEL: ${{ steps.qa.outputs.model }}
+        with:
+          script: |
+            const review = process.env.QA_REVIEW || '审查结果不可用';
+            const model = process.env.QA_MODEL || 'unknown';
+            const marker = '<!-- qa-review-bot -->';
+            const body = `${marker}\n## 🔍 QA 自动审查（${model}）\n\n${review}\n\n---\n*由 qa-review.yml 自动触发*`;
+
+            // Find existing QA comment to update (avoid duplicates on synchronize)
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

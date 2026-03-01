@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ⚙️ 根据项目类型选择 Node 或 Python，删掉另一段
+      # --- Node.js ---
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - run: npm ci
+
+      # --- Python ---
+      # - uses: actions/setup-python@v5
+      #   with:
+      #     python-version: '3.11'
+      # - run: pip install -r requirements.txt
+
+      # 第一道门：Lint + 类型检查
+      - name: Lint
+        run: |
+          # ⚙️ 根据项目类型选择
+          npm run lint          # JS/TS
+          # ruff check .        # Python
+
+      # 第二道门：单元测试 + 覆盖率门控
+      - name: Unit Tests
+        run: |
+          # ⚙️ 根据项目类型选择
+          npm run test:coverage -- --coverage.thresholds.statements=80
+          # pytest --cov --cov-fail-under=80
+
+      # 第三道门：E2E 测试（有则开启）
+      # - name: E2E Tests
+      #   run: npx playwright test
+
+      # 第四道门：构建
+      - name: Build
+        run: |
+          # ⚙️ 根据项目类型选择
+          npm run build
+          # python -m build
+
+      # 指标收集（上传为 artifact，不回写仓库）
+      - name: 记录 CI 指标
+        if: always()
+        run: |
+          mkdir -p .metrics
+          echo "{\"date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"actor\":\"${{ github.actor }}\",\"branch\":\"${{ github.ref_name }}\",\"commit\":\"${{ github.sha }}\",\"status\":\"${{ job.status }}\",\"run_id\":\"${{ github.run_id }}\"}" > .metrics/ci-result.json
+
+      - name: 上传 CI 指标
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-metrics-${{ github.run_id }}
+          path: .metrics/ci-result.json
+          retention-days: 90
+
+      # 失败通知（仅失败时推送钉钉）
+      - name: 钉钉失败通知
+        if: failure()
+        env:
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+        run: |
+          if [ -z "$DINGTALK_WEBHOOK" ]; then
+            echo "⚠️ DINGTALK_WEBHOOK 未配置，跳过钉钉通知"
+            echo "请在 GitHub Repo Settings → Secrets 中添加 DINGTALK_WEBHOOK"
+            exit 0
+          fi
+          BODY=$(jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg actor "${{ github.actor }}" \
+            --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{msgtype:"text",text:{content:("❌ CI 失败\n项目："+$repo+"\n分支："+$branch+"\n操作人："+$actor+"\n链接："+$url)}}')
+          curl -fsS -X POST "$DINGTALK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "$BODY"

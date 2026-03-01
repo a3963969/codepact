@@ -1,0 +1,15 @@
+#!/bin/sh
+# pre-commit hook
+# 提交前自动运行测试，任何测试失败则阻断提交
+# 安装方式：cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+echo "🔍 Running pre-commit tests..."
+
+# ⚙️ 根据项目类型选择一行，删掉另一行
+if ! npm test -- --run; then       # JS/TS 项目（Vitest）
+# if ! pytest -q; then             # Python 项目
+  echo "❌ Tests failed. Commit aborted."
+  exit 1
+fi
+
+echo "✅ All tests passed."
