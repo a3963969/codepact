@@ -8,10 +8,12 @@ set -e
 echo "🔧 项目初始化..."
 
 # 1. 安装 pre-commit hook
-if [ -d ".git" ]; then
+if git rev-parse --git-dir &>/dev/null; then
+  GIT_HOOKS_DIR="$(git rev-parse --git-dir)/hooks"
   if [ -f "hooks/pre-commit" ]; then
-    cp hooks/pre-commit .git/hooks/pre-commit
-    chmod +x .git/hooks/pre-commit
+    mkdir -p "$GIT_HOOKS_DIR"
+    cp hooks/pre-commit "$GIT_HOOKS_DIR/pre-commit"
+    chmod +x "$GIT_HOOKS_DIR/pre-commit"
     echo "✅ pre-commit hook 已安装"
   else
     echo "❌ hooks/pre-commit 文件不存在，请检查仓库完整性"

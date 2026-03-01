@@ -6,7 +6,7 @@ on:
 
 permissions:
   contents: write
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   update-status:
@@ -70,9 +70,15 @@ jobs:
             const fmEnd = fmMatch[0].length;
             const body = originalContent.slice(fmEnd);
 
-            // Only update if current status is 草稿 or 已确认
-            if (!/^status:\s*(草稿|已确认)\s*$/m.test(fmBlock)) {
-              core.info('ℹ️ 契约状态无需更新（当前状态非草稿或已确认）');
+            // 「草稿」不允许直接变「已实现」，必须先人工确认
+            if (/^status:\s*草稿\s*$/m.test(fmBlock)) {
+              core.warning('⚠️ 契约仍为「草稿」状态。请先将契约确认为「已确认」后再合并实现 PR。跳过自动状态更新。');
+              return;
+            }
+
+            // 只有「已确认」才自动更新为「已实现」
+            if (!/^status:\s*已确认\s*$/m.test(fmBlock)) {
+              core.info('ℹ️ 契约状态无需更新（当前状态非「已确认」）');
               return;
             }
 
@@ -87,13 +93,14 @@ jobs:
               return;
             }
 
-            // Atomic update via API: SHA acts as optimistic lock, no git push needed
+            // 尝试直接写入；若分支保护阻止，回退到 PR
+            const commitMsg = `chore: 契约状态更新为已实现 → ${contractFile} [skip ci]`;
             try {
               await github.rest.repos.createOrUpdateFileContents({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 path: contractFile,
-                message: `chore: 契约状态更新为已实现 → ${contractFile} [skip ci]`,
+                message: commitMsg,
                 content: Buffer.from(updatedContent).toString('base64'),
                 sha: fileData.sha,
                 branch: baseRef,
@@ -102,6 +109,58 @@ jobs:
             } catch (e) {
               if (e.status === 409) {
                 core.warning('契约文件并发更新冲突，请手动更新状态');
+              } else if (e.status === 403 || e.status === 422) {
+                // 分支保护阻止直接写入，回退到创建 PR
+                core.info('⚠️ 分支保护阻止直接写入，改用 PR 方式');
+                const prNumber = context.issue.number;
+                const tempBranch = `chore/contract-status-pr${prNumber}`;
+
+                // 清理可能残留的同名分支
+                try {
+                  await github.rest.git.deleteRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: `heads/${tempBranch}`,
+                  });
+                } catch { /* 分支不存在则忽略 */ }
+
+                const baseData = await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `heads/${baseRef}`,
+                });
+                await github.rest.git.createRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `refs/heads/${tempBranch}`,
+                  sha: baseData.data.object.sha,
+                });
+
+                const freshFile = await github.rest.repos.getContent({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  path: contractFile,
+                  ref: tempBranch,
+                });
+                await github.rest.repos.createOrUpdateFileContents({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  path: contractFile,
+                  message: commitMsg,
+                  content: Buffer.from(updatedContent).toString('base64'),
+                  sha: freshFile.data.sha,
+                  branch: tempBranch,
+                });
+
+                const newPr = await github.rest.pulls.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: `chore: 契约状态 → 已实现（${contractFile}）`,
+                  head: tempBranch,
+                  base: baseRef,
+                  body: `由 update-contract-status.yml 自动触发。\n\n关联 PR: ${prUrl}\n\n> 分支保护阻止直接写入，请合并此 PR 完成状态更新。`,
+                });
+                core.info(`✅ 已创建契约状态更新 PR: ${newPr.data.html_url}`);
               } else {
                 core.setFailed(`更新契约状态失败：${e.message}`);
               }

@@ -48,18 +48,29 @@ runs:
 
           // Fallback: fuzzy branch name matching with normalization
           if (!contractFile) {
-            const keyword = branch
+            const rawKeyword = branch
               .replace(/^(feature|fix|chore|refactor)\//, '');
 
-            if (keyword && fs.existsSync('docs/contracts')) {
-              const files = fs.readdirSync('docs/contracts');
-              // Escape regex metacharacters, then normalize hyphens/underscores
-              const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const normalizedKeyword = escaped.replace(/[-_]/g, '[-_]');
-              const regex = new RegExp(normalizedKeyword, 'i');
-              const matches = files
-                .filter(f => f !== '_template.md' && f.endsWith('.md'))
-                .filter(f => regex.test(f.replace(/[-_]/g, '-')));
+            // 尝试剥离操作人后缀（分支格式：feature/功能名-操作人）
+            const candidates = [rawKeyword];
+            const withoutOperator = rawKeyword.replace(/-[^-]+$/, '');
+            if (withoutOperator && withoutOperator !== rawKeyword) {
+              candidates.push(withoutOperator);
+            }
+
+            if (rawKeyword && fs.existsSync('docs/contracts')) {
+              const files = fs.readdirSync('docs/contracts')
+                .filter(f => f !== '_template.md' && f.endsWith('.md'));
+
+              let matches = [];
+              for (const keyword of candidates) {
+                // 统一连字符/下划线为 -，再转义为正则
+                const normalized = keyword.replace(/[-_]/g, '-');
+                const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const regex = new RegExp(escaped, 'i');
+                matches = files.filter(f => regex.test(f.replace(/[-_]/g, '-')));
+                if (matches.length > 0) break; // 全名优先，匹配成功即停止
+              }
 
               if (matches.length === 1) {
                 contractFile = `docs/contracts/${matches[0]}`;

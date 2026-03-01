@@ -67,6 +67,6 @@ with open('.metrics/ci-log.jsonl') as f:
         except: pass
 with open('.metrics/ci-log.jsonl', 'w') as f:
     f.write('\n'.join(lines) + '\n')
-print(f'✅ 已汇总 {len(lines)} 条指标记录（本次新增 $COUNT 条）')
+print(f'✅ 已汇总 {len(lines)} 条唯一指标记录（下载了 $COUNT 个 artifact，去重后共 {len(lines)} 条）')
 "
 fi

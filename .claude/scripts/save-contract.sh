@@ -14,7 +14,7 @@ if [ -z "$MODULE" ] || [ -z "$FEATURE" ]; then
   exit 1
 fi
 
-# 校验参数：只允许字母、数字和连字符
+# 校验参数：只允许英文字母、数字和连字符（防 shell 注入，中文请用拼音或英文缩写）
 if ! echo "$MODULE" | grep -qE '^[a-zA-Z0-9-]+$'; then
   echo "❌ 模块名只允许字母、数字和连字符，收到：$MODULE"
   exit 1

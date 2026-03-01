@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -31,6 +35,12 @@ jobs:
           # ⚙️ 根据项目类型选择
           npm run lint          # JS/TS
           # ruff check .        # Python
+
+      - name: Type Check
+        run: |
+          # ⚙️ 根据项目类型选择
+          npx tsc --noEmit      # JS/TS
+          # mypy .              # Python
 
       # 第二道门：单元测试 + 覆盖率门控
       - name: Unit Tests

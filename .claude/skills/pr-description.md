@@ -20,6 +20,10 @@
 - [ ] 没有引入新的 lint 错误
 - [ ] 核心逻辑是纯函数
 - [ ] 覆盖率没有下降
+
+## QA 审查
+<!-- qa-review.yml 自动填入（需配置 ANTHROPIC_API_KEY Secret） -->
+<!-- 请查看下方 Bot 评论中的 QA 审查结果，根据 severity 决定是否合并 -->
 ```
 
 ## 写作原则
