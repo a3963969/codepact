@@ -76,3 +76,4 @@ bash .claude/scripts/save-contract.sh <模块名> <功能名>
 - 写测试时参考：.claude/skills/write-tests.md
 - 修复 Bug 时参考：.claude/skills/bug-fix-flow.md
 - 写 PR 描述时参考：.claude/skills/pr-description.md
+- QA 共识审查时参考：.claude/skills/qa-review-local.md（首选：PAL consensus，codex + gemini-pro）

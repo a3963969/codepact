@@ -16,7 +16,37 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 检查是否已有本地共识审查（PAL consensus 发布的评论）
+      - name: 检查本地共识审查
+        id: check-local
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            // 结构化校验：标记 + 至少两个模型结果 + 综合结论
+            const hasConsensus = comments.data.some(c => {
+              if (!c.body) return false;
+              const body = c.body;
+              const hasMarker = body.includes('<!-- qa-review-consensus -->');
+              // 必须包含至少两个模型审查段（### model-name 格式）
+              const modelSections = (body.match(/^### .+$/gm) || []).length;
+              // 必须包含综合结论段
+              const hasConclusion = body.includes('综合结论');
+              // 必须包含 severity 判定
+              const hasSeverity = /severity.*[高中低]/.test(body);
+              return hasMarker && modelSections >= 2 && hasConclusion && hasSeverity;
+            });
+            core.setOutput('has_local', hasConsensus ? 'true' : 'false');
+            if (hasConsensus) {
+              core.info('✅ 已检测到本地 PAL consensus 共识审查（含多模型结果+结论），跳过 CI 审查');
+            }
+
       - name: 获取 PR Diff
+        if: steps.check-local.outputs.has_local != 'true'
         id: get-diff
         run: |
           FULL_DIFF=$(git diff "${{ github.event.pull_request.base.sha }}"..."${{ github.event.pull_request.head.sha }}" --)
@@ -33,6 +63,7 @@ jobs:
           echo "${EOF_DELIM}" >> $GITHUB_OUTPUT
 
       - name: 查找关联契约
+        if: steps.check-local.outputs.has_local != 'true'
         id: find-contract
         uses: ./.github/actions/find-contract
         with:
@@ -40,6 +71,7 @@ jobs:
           branch: ${{ github.event.pull_request.head.ref }}
 
       - name: 读取契约内容
+        if: steps.check-local.outputs.has_local != 'true'
         id: get-contract
         uses: actions/github-script@v7
         env:
@@ -61,7 +93,9 @@ jobs:
             }
             core.setOutput('content', contractContent);
 
-      - name: 调用 AI QA 审查
+      # CI 回退：当本地共识审查未发布时，使用 Anthropic API 单模型审查
+      - name: 调用 AI QA 审查（CI 回退）
+        if: steps.check-local.outputs.has_local != 'true'
         id: qa
         uses: actions/github-script@v7
         env:
@@ -74,7 +108,7 @@ jobs:
           script: |
             const apiKey = process.env.ANTHROPIC_API_KEY;
             if (!apiKey) {
-              core.setOutput('review', '⚠️ ANTHROPIC_API_KEY 未配置，跳过自动 QA 审查。\n\n请在 GitHub Repo Settings → Secrets 中添加 ANTHROPIC_API_KEY 以启用自动审查。');
+              core.setOutput('review', '⚠️ ANTHROPIC_API_KEY 未配置，且未检测到本地共识审查。\n\n推荐方式：在 Claude Code 中使用 PAL consensus（codex + gemini-pro）进行本地 QA 审查，结果会自动发布到 PR 评论。\n\n备选方式：在 GitHub Repo Settings → Secrets 中添加 ANTHROPIC_API_KEY 启用 CI 自动审查。');
               core.setOutput('model', 'none');
               return;
             }
@@ -145,7 +179,8 @@ jobs:
               core.setOutput('model', 'error');
             }
 
-      - name: 发布 QA 审查评论
+      - name: 发布 QA 审查评论（CI 回退）
+        if: steps.check-local.outputs.has_local != 'true'
         uses: actions/github-script@v7
         env:
           QA_REVIEW: ${{ steps.qa.outputs.review }}
@@ -155,7 +190,7 @@ jobs:
             const review = process.env.QA_REVIEW || '审查结果不可用';
             const model = process.env.QA_MODEL || 'unknown';
             const marker = '<!-- qa-review-bot -->';
-            const body = `${marker}\n## 🔍 QA 自动审查（${model}）\n\n${review}\n\n---\n*由 qa-review.yml 自动触发*`;
+            const body = `${marker}\n## 🔍 QA 自动审查 · CI 回退（${model}）\n\n${review}\n\n---\n*由 qa-review.yml 自动触发（未检测到本地共识审查）*`;
 
             // Find existing QA comment to update (avoid duplicates on synchronize)
             const comments = await github.rest.issues.listComments({
