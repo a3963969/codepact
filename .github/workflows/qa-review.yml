@@ -25,50 +25,39 @@ jobs:
           if [ "$FULL_SIZE" -gt 8000 ]; then
             DIFF="${DIFF}
 
-... [diff 已截断：完整 ${FULL_SIZE} 字节，仅展示前 8000 字节，部分文件可能未包含在审查中]"
+          ... [diff 已截断：完整 ${FULL_SIZE} 字节，仅展示前 8000 字节，部分文件可能未包含在审查中]"
           fi
           EOF_DELIM=$(openssl rand -hex 8)
           echo "diff<<${EOF_DELIM}" >> $GITHUB_OUTPUT
           echo "$DIFF" >> $GITHUB_OUTPUT
           echo "${EOF_DELIM}" >> $GITHUB_OUTPUT
 
-      - name: 获取关联契约内容
+      - name: 查找关联契约
+        id: find-contract
+        uses: ./.github/actions/find-contract
+        with:
+          pr_body: ${{ github.event.pull_request.body }}
+          branch: ${{ github.event.pull_request.head.ref }}
+
+      - name: 读取契约内容
         id: get-contract
         uses: actions/github-script@v7
+        env:
+          CONTRACT_FILE: ${{ steps.find-contract.outputs.contract_file }}
         with:
           script: |
             const fs = require('fs');
-            const prBody = context.payload.pull_request.body || '';
-            const branch = context.payload.pull_request.head.ref || '';
-
-            let contractFile = null;
-
-            // Primary: explicit contract path in PR body
-            const bodyMatch = prBody.match(/docs\/contracts\/[^\s`'"]+\.md/);
-            if (bodyMatch && fs.existsSync(bodyMatch[0])) {
-              contractFile = bodyMatch[0];
-            }
-
-            // Fallback: fuzzy branch name matching (same logic as link-contract.yml)
-            if (!contractFile) {
-              const keyword = branch.replace(/^(feature|fix|chore|refactor)\//, '');
-              if (keyword && fs.existsSync('docs/contracts')) {
-                const files = fs.readdirSync('docs/contracts');
-                const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const normalizedKeyword = escaped.replace(/[-_]/g, '[-_]');
-                const regex = new RegExp(normalizedKeyword, 'i');
-                const matches = files
-                  .filter(f => f !== '_template.md' && f.endsWith('.md'))
-                  .filter(f => regex.test(f.replace(/[-_]/g, '-')));
-                if (matches.length === 1) {
-                  contractFile = `docs/contracts/${matches[0]}`;
-                }
-              }
-            }
+            const contractFile = process.env.CONTRACT_FILE || '';
 
             let contractContent = '（未找到关联契约）';
             if (contractFile && fs.existsSync(contractFile)) {
-              contractContent = fs.readFileSync(contractFile, 'utf-8').substring(0, 3000);
+              const rawContent = fs.readFileSync(contractFile, 'utf-8');
+              // Strip YAML front-matter if present, only pass body to AI
+              const fmMatch = rawContent.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
+              contractContent = fmMatch
+                ? rawContent.slice(fmMatch[0].length)
+                : rawContent;
+              contractContent = contractContent.substring(0, 3000);
             }
             core.setOutput('content', contractContent);
 

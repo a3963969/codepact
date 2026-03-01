@@ -17,50 +17,25 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.ref }}
 
-      - name: 查找并更新契约状态
+      - name: 查找关联契约
+        id: find-contract
+        uses: ./.github/actions/find-contract
+        with:
+          pr_body: ${{ github.event.pull_request.body }}
+          branch: ${{ github.event.pull_request.head.ref }}
+
+      - name: 更新契约状态
+        if: steps.find-contract.outputs.found == 'true'
         uses: actions/github-script@v7
+        env:
+          CONTRACT_FILE: ${{ steps.find-contract.outputs.contract_file }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         with:
           script: |
-            const fs = require('fs');
-
-            // Safe: PR body is a JS string, never interpolated into shell
-            const prBody = context.payload.pull_request.body || '';
-            const branch = context.payload.pull_request.head.ref || '';
-
-            // Primary: explicit contract path in PR body
-            const bodyMatch = prBody.match(/docs\/contracts\/[^\s`'"]+\.md/);
-            let contractFile = null;
-
-            if (bodyMatch) {
-              const candidate = bodyMatch[0];
-              if (fs.existsSync(candidate)) {
-                contractFile = candidate;
-              }
-            }
-
-            // Fallback: fuzzy branch name matching with normalization
-            if (!contractFile) {
-              const keyword = branch
-                .replace(/^(feature|fix|chore|refactor)\//, '');
-
-              if (keyword && fs.existsSync('docs/contracts')) {
-                const files = fs.readdirSync('docs/contracts');
-                // Escape regex metacharacters, then normalize hyphens/underscores
-                const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const normalizedKeyword = escaped.replace(/[-_]/g, '[-_]');
-                const regex = new RegExp(normalizedKeyword, 'i');
-                const matches = files
-                  .filter(f => f !== '_template.md' && f.endsWith('.md'))
-                  .filter(f => regex.test(f.replace(/[-_]/g, '-')));
-
-                if (matches.length === 1) {
-                  contractFile = `docs/contracts/${matches[0]}`;
-                } else if (matches.length > 1) {
-                  core.warning(`多个契约文件匹配，跳过自动更新：${matches.join(', ')}`);
-                  return;
-                }
-              }
-            }
+            const contractFile = process.env.CONTRACT_FILE;
+            const prUrl = process.env.PR_URL;
+            const baseRef = process.env.BASE_REF;
 
             if (!contractFile) {
               core.info('ℹ️ 未找到匹配契约文件，跳过状态更新');
@@ -74,7 +49,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 path: contractFile,
-                ref: context.payload.pull_request.base.ref,
+                ref: baseRef,
               });
               fileData = response.data;
             } catch (e) {
@@ -83,12 +58,32 @@ jobs:
             }
 
             const originalContent = Buffer.from(fileData.content, 'base64').toString('utf-8');
-            const updatedContent = originalContent
-              .replace(/状态：已确认/g, '状态：已实现')
-              .replace(/状态：草稿/g, '状态：已实现');
+
+            // Parse YAML front-matter and update status field precisely
+            const fmMatch = originalContent.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
+            if (!fmMatch) {
+              core.warning('契约文件无 YAML front-matter，跳过自动状态更新。请手动将状态改为「已实现」。');
+              return;
+            }
+
+            const fmBlock = fmMatch[1];
+            const fmEnd = fmMatch[0].length;
+            const body = originalContent.slice(fmEnd);
+
+            // Only update if current status is 草稿 or 已确认
+            if (!/^status:\s*(草稿|已确认)\s*$/m.test(fmBlock)) {
+              core.info('ℹ️ 契约状态无需更新（当前状态非草稿或已确认）');
+              return;
+            }
+
+            // Update status and linked_pr in front-matter
+            let updatedFm = fmBlock.replace(/^status:\s*.+$/m, 'status: 已实现');
+            updatedFm = updatedFm.replace(/^linked_pr:\s*.*$/m, `linked_pr: "${prUrl}"`);
+
+            const updatedContent = `---\n${updatedFm}\n---\n${body}`;
 
             if (originalContent === updatedContent) {
-              core.info('ℹ️ 契约状态无需更新');
+              core.info('ℹ️ 契约内容无变化');
               return;
             }
 
@@ -101,7 +96,7 @@ jobs:
                 message: `chore: 契约状态更新为已实现 → ${contractFile} [skip ci]`,
                 content: Buffer.from(updatedContent).toString('base64'),
                 sha: fileData.sha,
-                branch: context.payload.pull_request.base.ref,
+                branch: baseRef,
               });
               core.info(`✅ 契约状态已更新：${contractFile}`);
             } catch (e) {
@@ -111,3 +106,8 @@ jobs:
                 core.setFailed(`更新契约状态失败：${e.message}`);
               }
             }
+
+      - name: 警告多个匹配
+        if: steps.find-contract.outputs.found == 'ambiguous'
+        run: |
+          echo "::warning::多个契约文件匹配，跳过自动更新：${{ steps.find-contract.outputs.matches }}"

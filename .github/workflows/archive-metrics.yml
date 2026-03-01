@@ -1,0 +1,114 @@
+name: Archive CI Metrics
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # 每周日 02:00 UTC
+  workflow_dispatch:       # 允许手动触发（用于首次回填）
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: 下载并归档 CI 指标
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir -p .metrics
+
+          REPO="${{ github.repository }}"
+          _TMPDIR=$(mktemp -d)
+          trap 'rm -rf "$_TMPDIR"' EXIT
+          NEW_COUNT=0
+
+          # Load existing run_ids to avoid duplicates
+          EXISTING_IDS=""
+          if [ -f .metrics/ci-log.jsonl ]; then
+            EXISTING_IDS=$(python3 -c "
+          import json
+          ids = set()
+          with open('.metrics/ci-log.jsonl') as f:
+              for line in f:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      d = json.loads(line)
+                      rid = str(d.get('run_id', ''))
+                      if rid:
+                          ids.add(rid)
+                  except ValueError:
+                      print(f'warning: skipping malformed line', file=__import__('sys').stderr)
+          print('\n'.join(ids))
+          ")
+          fi
+
+          # Paginate through all ci-metrics-* artifacts
+          ARTIFACT_IDS=$(gh api "repos/${REPO}/actions/artifacts" \
+            --paginate \
+            -q '.artifacts[] | select(.name | startswith("ci-metrics-")) | .id' \
+            2>/dev/null || true)
+
+          if [ -z "$ARTIFACT_IDS" ]; then
+            echo "ℹ️ 未找到 CI 指标 Artifact"
+          else
+            for ARTIFACT_ID in $ARTIFACT_IDS; do
+              # Download artifact zip
+              if ! gh api "repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+                > "${_TMPDIR}/${ARTIFACT_ID}.zip" 2>/dev/null; then
+                echo "  ⚠️ 下载 artifact ${ARTIFACT_ID} 失败，跳过"
+                continue
+              fi
+
+              if ! unzip -qo "${_TMPDIR}/${ARTIFACT_ID}.zip" \
+                -d "${_TMPDIR}/extracted" 2>/dev/null; then
+                echo "  ⚠️ 解压 artifact ${ARTIFACT_ID} 失败，跳过"
+                continue
+              fi
+
+              if [ -f "${_TMPDIR}/extracted/ci-result.json" ]; then
+                RUN_ID=$(python3 -c "
+          import json
+          try:
+              with open('${_TMPDIR}/extracted/ci-result.json') as f:
+                  d = json.load(f)
+              print(str(d.get('run_id', '')))
+          except Exception:
+              print('')
+          ")
+                # Skip if already archived
+                if [ -n "$RUN_ID" ] && echo "$EXISTING_IDS" | grep -qF "$RUN_ID"; then
+                  rm -rf "${_TMPDIR}/extracted"
+                  continue
+                fi
+                cat "${_TMPDIR}/extracted/ci-result.json" >> .metrics/ci-log.jsonl
+                echo "" >> .metrics/ci-log.jsonl
+                if [ -n "$RUN_ID" ]; then
+                  EXISTING_IDS="${EXISTING_IDS}
+          ${RUN_ID}"
+                fi
+                NEW_COUNT=$((NEW_COUNT + 1))
+              fi
+              rm -rf "${_TMPDIR}/extracted"
+            done
+          fi
+
+          echo "NEW_COUNT=${NEW_COUNT}" >> "$GITHUB_ENV"
+          echo "✅ 新增 ${NEW_COUNT} 条指标记录"
+
+      - name: 提交归档结果
+        if: env.NEW_COUNT != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .metrics/ci-log.jsonl
+          git commit -m "chore: 归档 CI 指标（+${NEW_COUNT} 条）[skip ci]"
+          git push
