@@ -31,12 +31,14 @@ jobs:
 
       # 第一道门：Lint + 类型检查
       - name: Lint
+        id: lint
         run: |
           # ⚙️ 根据项目类型选择
           npm run lint          # JS/TS
           # ruff check .        # Python
 
       - name: Type Check
+        id: typecheck
         run: |
           # ⚙️ 根据项目类型选择
           npx tsc --noEmit      # JS/TS
@@ -44,6 +46,7 @@ jobs:
 
       # 第二道门：单元测试 + 覆盖率门控
       - name: Unit Tests
+        id: unit-tests
         run: |
           # ⚙️ 根据项目类型选择
           npm run test:coverage -- --coverage.thresholds.statements=80
@@ -51,10 +54,12 @@ jobs:
 
       # 第三道门：E2E 测试（有则开启）
       # - name: E2E Tests
+      #   id: e2e
       #   run: npx playwright test
 
       # 第四道门：构建
       - name: Build
+        id: build
         run: |
           # ⚙️ 根据项目类型选择
           npm run build
@@ -65,7 +70,9 @@ jobs:
         if: always()
         run: |
           mkdir -p .metrics
-          echo "{\"date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"actor\":\"${{ github.actor }}\",\"branch\":\"${{ github.ref_name }}\",\"commit\":\"${{ github.sha }}\",\"status\":\"${{ job.status }}\",\"run_id\":\"${{ github.run_id }}\"}" > .metrics/ci-result.json
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+          COMMIT="${{ github.event.pull_request.head.sha || github.sha }}"
+          echo "{\"date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"actor\":\"${{ github.actor }}\",\"branch\":\"${BRANCH}\",\"commit\":\"${COMMIT}\",\"status\":\"${{ job.status }}\",\"run_id\":\"${{ github.run_id }}\"}" > .metrics/ci-result.json
 
       - name: 上传 CI 指标
         if: always()
@@ -75,7 +82,7 @@ jobs:
           path: .metrics/ci-result.json
           retention-days: 90
 
-      # 失败通知（仅失败时推送钉钉）
+      # 失败通知（仅失败时推送钉钉 Markdown）
       - name: 钉钉失败通知
         if: failure()
         env:
@@ -86,12 +93,52 @@ jobs:
             echo "请在 GitHub Repo Settings → Secrets 中添加 DINGTALK_WEBHOOK"
             exit 0
           fi
+
+          # 定位失败步骤
+          FAILED=""
+          [ "${{ steps.lint.outcome }}" = "failure" ] && FAILED="Lint"
+          [ "${{ steps.typecheck.outcome }}" = "failure" ] && FAILED="Type Check"
+          [ "${{ steps.unit-tests.outcome }}" = "failure" ] && FAILED="Unit Tests"
+          [ "${{ steps.build.outcome }}" = "failure" ] && FAILED="Build"
+          [ -z "$FAILED" ] && FAILED="未知"
+
+          # 实际分支名（PR 用 head_ref，push 用 ref_name）
+          BRANCH="${{ github.head_ref || github.ref_name }}"
+
+          # 提交信息
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            COMMIT_MSG="${{ github.event.pull_request.title }}"
+            COMMIT_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            COMMIT_MSG=$(git log -1 --pretty='%s')
+            COMMIT_SHA="${{ github.sha }}"
+          fi
+          SHORT_SHA=${COMMIT_SHA:0:7}
+
+          # PR 行（仅 PR 事件）
+          PR_LINE=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            PR_LINE="- **PR**: [#${{ github.event.pull_request.number }}](${{ github.event.pull_request.html_url }})"
+          fi
+
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # 构建 Markdown 消息体
+          TEXT=$(printf '### ❌ CI 失败\n\n**失败步骤**: %s\n\n- **项目**: %s\n- **分支**: %s\n- **提交**: `%s` %s\n- **操作人**: %s\n%s\n\n[查看运行日志](%s)' \
+            "$FAILED" \
+            "${{ github.repository }}" \
+            "$BRANCH" \
+            "$SHORT_SHA" \
+            "$COMMIT_MSG" \
+            "${{ github.actor }}" \
+            "$PR_LINE" \
+            "$RUN_URL")
+
           BODY=$(jq -n \
-            --arg repo "${{ github.repository }}" \
-            --arg branch "${{ github.ref_name }}" \
-            --arg actor "${{ github.actor }}" \
-            --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            '{msgtype:"text",text:{content:("❌ CI 失败\n项目："+$repo+"\n分支："+$branch+"\n操作人："+$actor+"\n链接："+$url)}}')
+            --arg title "CI 失败：${FAILED}" \
+            --arg text "$TEXT" \
+            '{msgtype:"markdown",markdown:{title:$title,text:$text}}')
+
           curl -fsS -X POST "$DINGTALK_WEBHOOK" \
             -H "Content-Type: application/json" \
             -d "$BODY"
